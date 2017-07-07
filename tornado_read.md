@@ -63,7 +63,8 @@ def _handle_connection(self, connection, address):
 一些解析头部的方法
 
 ### httpserver.py:
-HTTPServer类直接继承TCPServer类，直接复写实现他的handle_stream方法, handle_stream里面放入了请求的回调函数
+#### HTTPServer类:
+直接继承TCPServer类，直接复写实现他的handle_stream方法, handle_stream里面放入了请求的回调函数
 ```python
 class HTTPServer(TCPServer):
     def __init__(self, request_callback, no_keep_alive=False, io_loop=None,
@@ -169,7 +170,7 @@ def handle_request(request):
 http_server = tornado.httpserver.HTTPServer(handle_request)
 ```
 
-* 一种是实现了__call__的对象;
+* 一种是实现了`__call__`的对象;
 ```python
 application = tornado.web.Application([(r"/", MainHandler), ])
 http_server = tornado.httpserver.HTTPServer(application)
@@ -224,4 +225,104 @@ http_server = tornado.httpserver.HTTPServer(application)
         self.request_callback(self._request)
 ```
 ### web.py:
-Application类的初始化的参数一般是一个列表，包括着一个个三元的元组（'pattern', 'handler', 'kwargs')
+#### Application类:
+初始化的参数一般是一个列表，包括着一个个三元的元组（'pattern', 'handler', 'kwargs')
+* 'pattern': str类型，路由的path;
+* 'handler': str类型类名字或者就是类, 路由的处理类;`handler = import_object(handler)`
+* 'kwargs': dict类型，额外参数非必需，比如'name', 'path'
+```python
+def add_handlers(self, host_pattern, host_handlers):
+    if not host_pattern.endswith("$"):
+        host_pattern += "$"
+    handlers = []
+    if self.handlers and self.handlers[-1][0].pattern == '.*$':
+        self.handlers.insert(-1, (re.compile(host_pattern), handlers))
+    else:
+        self.handlers.append((re.compile(host_pattern), handlers))
+    for spec in host_handlers:
+        if type(spec) is type(()):
+            assert len(spec) in (2, 3)
+            pattern = spec[0]
+            handler = spec[1]
+            if isinstance(handler, str):
+                # 根据名字倒入自定义的处理器类
+                handler = import_object(handler)
+            if len(spec) == 3:
+                kwargs = spec[2]
+            else:
+                kwargs = {}
+            spec = URLSpec(pattern, handler, kwargs)
+        handlers.append(spec)
+        if spec.name:
+            if spec.name in self.named_handlers:
+                logging.warning(
+                    "Multiple handlers named %s; replacing previous value",
+                    spec.name)
+            self.named_handlers[spec.name] = spec
+```
+如之前说的，application是一个类，想要作为一个reques_callback就必须实现`__call__`方法
+```python
+def __call__(self, request):
+    transforms = [t(request) for t in self.transforms]
+    handler = None
+    args = []
+    kwargs = {}
+    # 如果没有匹配的主机名，就会返回None，就会执行下面的RedirectHandler, 重定向至默认主机处理
+    handlers = self._get_host_handlers(request)
+    if not handlers:
+        handler = RedirectHandler(
+            self, request, url="http://" + self.default_host + "/")
+    else:
+        for spec in handlers:
+            # 匹配路由规则，如果咩有匹配到那么就会进行404错误处理
+            match = spec.regex.match(request.path)
+            if match:
+                handler = spec.handler_class(self, request, **spec.kwargs)
+                if spec.regex.groups:
+                    def unquote(s):
+                        if s is None:
+                            return s
+                        return escape.url_unescape(s, encoding=None)
+                    if spec.regex.groupindex:
+                        kwargs = dict(
+                            (str(k), unquote(v))
+                            for (k, v) in match.groupdict().iteritems())
+                    else:
+                        args = [unquote(s) for s in match.groups()]
+                break
+        if not handler:
+            handler = ErrorHandler(self, request, status_code=404)
+    # 以得到参数，执行handler
+    handler._execute(transforms, *args, **kwargs)
+    return handler
+```
+handler的执行逻辑如下:
+```python
+def _execute(self, transforms, *args, **kwargs):
+    self._transforms = transforms
+    try:
+        # SUPPORTED_METHODS = ("GET", "HEAD", "POST", "DELETE", "PATCH", "PUT", "OPTIONS")
+        # 不支持方法就进行405错误处理
+        if self.request.method not in self.SUPPORTED_METHODS:
+            raise HTTPError(405)
+        # 检查xsrf_cookie
+        if self.request.method not in ("GET", "HEAD", "OPTIONS") and \
+           self.application.settings.get("xsrf_cookies"):
+            self.check_xsrf_cookie()
+        # 处理前的中间件函数, 类似于falsk的before_request, 可以用来进行访问日志记录
+        self.prepare()
+        if not self._finished:
+            args = [self.decode_argument(arg) for arg in args]
+            kwargs = dict((k, self.decode_argument(v, name=k))
+                          for (k, v) in kwargs.iteritems())
+            # 真正执行代码在这，通过getattr得到自定义的处理类的方法执行函数, 然后执行之前得到的参数
+            getattr(self, self.request.method.lower())(*args, **kwargs)
+            if self._auto_finish and not self._finished:
+                self.finish()
+    except Exception, e:
+        self._handle_request_exception(e)
+```
+#### RequestHandler类:
+HTTP请求处理的一个极好的实例，值得细看，后看先挖坑, 先看tornado另一个谜一样的类：gen
+### gen.py:
+
